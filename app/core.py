@@ -7,7 +7,7 @@ from datetime import datetime
 from typing import Dict, List, Tuple
 
 
-SELECTION_VALID = "Valid classification"
+SELECTION_VALID = "Valid"
 SELECTION_SIMILAR = "Similar"
 SELECTION_INCORRECT = "Incorrect"
 ALL_SELECTIONS = [SELECTION_VALID, SELECTION_SIMILAR, SELECTION_INCORRECT]
@@ -58,6 +58,8 @@ class Progress:
         self._remaining: List[str] = [s.rel_path for s in snippets]
         # Lookup for labels by rel_path
         self._labels: Dict[str, str] = {s.rel_path: s.label for s in snippets}
+        # Track current active label for filtering
+        self.active_label: str | None = None
 
     @property
     def total(self) -> int:
@@ -70,8 +72,28 @@ class Progress:
     @property
     def reviewed(self) -> int:
         return len(self.decisions)
+    
+    def get_all_labels(self) -> List[str]:
+        """Return sorted list of all unique labels."""
+        return sorted(set(self._labels.values()))
+    
+    def get_label_files(self, label: str) -> List[str]:
+        """Return list of file rel_paths for a specific label (all files, reviewed and unreviewed)."""
+        return sorted([rp for rp, lbl in self._labels.items() if lbl == label])
+    
+    def get_remaining_for_label(self, label: str) -> List[str]:
+        """Return list of remaining (unreviewed) file rel_paths for a specific label."""
+        return [rp for rp in self._remaining if self._labels.get(rp) == label]
+    
+    def set_active_label(self, label: str) -> None:
+        """Set the current active label to work on."""
+        self.active_label = label
 
     def next_rel_path(self) -> str | None:
+        """Return next file to review, filtered by active_label if set."""
+        if self.active_label:
+            remaining_for_label = self.get_remaining_for_label(self.active_label)
+            return remaining_for_label[0] if remaining_for_label else None
         return self._remaining[0] if self._remaining else None
 
     def get_label(self, rel_path: str) -> str:
