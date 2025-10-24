@@ -6,9 +6,10 @@ from datetime import datetime
 from typing import Optional
 
 from PIL import Image
-from PyQt6.QtCore import Qt, QSize
-from PyQt6.QtGui import QAction, QCloseEvent, QFont, QImage, QPixmap
-from PyQt6.QtWidgets import (
+from PyQt5.QtCore import Qt, QSize
+from PyQt5.QtGui import QFont, QImage, QPixmap
+from PyQt5.QtWidgets import (
+    QAction,
     QApplication,
     QFileDialog,
     QLabel,
@@ -21,6 +22,9 @@ from PyQt6.QtWidgets import (
     QVBoxLayout,
     QHBoxLayout,
     QWidget,
+    QTreeWidget,
+    QTreeWidgetItem,
+    QSplitter,
 )
 
 from . import __version__
@@ -43,6 +47,7 @@ class MainWindow(QMainWindow):
 
         self.progress = None  # type: ignore
         self.current_rel_path: Optional[str] = None
+        self.current_label: Optional[str] = None  # Track which label we're working on
         self.unsaved_changes = False
         self._current_qimage_bytes = None  # keep bytes alive
 
@@ -90,8 +95,20 @@ class MainWindow(QMainWindow):
         toolbar.addAction(self.act_export_stats)
 
     def _create_central_widgets(self) -> None:
-        container = QWidget()
-        vbox = QVBoxLayout(container)
+        # Main splitter: left (tree) | right (content)
+        main_splitter = QSplitter(Qt.Horizontal)
+        
+        # Left side: Label tree
+        self.label_tree = QTreeWidget()
+        self.label_tree.setHeaderLabel("Labels")
+        self.label_tree.setMinimumWidth(200)
+        self.label_tree.setMaximumWidth(400)
+        self.label_tree.itemClicked.connect(self.on_tree_item_clicked)
+        main_splitter.addWidget(self.label_tree)
+        
+        # Right side: Image viewer
+        right_container = QWidget()
+        vbox = QVBoxLayout(right_container)
 
         # Big label for the classifier label
         self.lbl_label = QLabel("")
@@ -99,26 +116,26 @@ class MainWindow(QMainWindow):
         font.setPointSize(24)
         font.setBold(True)
         self.lbl_label.setFont(font)
-        self.lbl_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.lbl_label.setAlignment(Qt.AlignCenter)
         self.lbl_label.setStyleSheet("color: #333;")
         vbox.addWidget(self.lbl_label)
 
         # Info label (smaller)
         self.lbl_info = QLabel("Open an output directory or load a progress file to start.")
         self.lbl_info.setWordWrap(True)
-        self.lbl_info.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.lbl_info.setAlignment(Qt.AlignCenter)
         self.lbl_info.setStyleSheet("color: #555;")
         vbox.addWidget(self.lbl_info)
 
         # Image area
         self.image_label = QLabel()
-        self.image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.image_label.setAlignment(Qt.AlignCenter)
         self.image_label.setBackgroundRole(self.image_label.backgroundRole())
         self.image_label.setMinimumSize(400, 300)
 
         self.scroll_area = QScrollArea()
         self.scroll_area.setWidgetResizable(True)
-        self.scroll_area.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.scroll_area.setAlignment(Qt.AlignCenter)
         self.scroll_area.setWidget(self.image_label)
         vbox.addWidget(self.scroll_area, stretch=1)
 
@@ -150,7 +167,11 @@ class MainWindow(QMainWindow):
         btn_row.addWidget(self.btn_incorrect)
         vbox.addLayout(btn_row)
 
-        self.setCentralWidget(container)
+        main_splitter.addWidget(right_container)
+        main_splitter.setStretchFactor(0, 1)  # Left tree doesn't stretch much
+        main_splitter.setStretchFactor(1, 3)  # Right content stretches more
+        
+        self.setCentralWidget(main_splitter)
 
         # Subtle overall stylesheet
         self.setStyleSheet(
@@ -159,6 +180,70 @@ class MainWindow(QMainWindow):
         )
 
     # ----- File actions -----
+    def populate_label_tree(self) -> None:
+        """Populate the tree widget with labels and their files."""
+        # Save expanded state before clearing
+        expanded_labels = set()
+        for i in range(self.label_tree.topLevelItemCount()):
+            item = self.label_tree.topLevelItem(i)
+            if item and item.isExpanded():
+                label_data = item.data(0, Qt.UserRole)
+                if label_data and label_data.get("type") == "label":
+                    expanded_labels.add(label_data["label"])
+        
+        self.label_tree.clear()
+        if not self.progress:
+            return
+        
+        labels = self.progress.get_all_labels()
+        for label in labels:
+            # Create parent item for label
+            label_item = QTreeWidgetItem(self.label_tree)
+            label_item.setText(0, label)
+            label_item.setData(0, Qt.UserRole, {"type": "label", "label": label})
+            
+            # Add child items for files
+            files = self.progress.get_label_files(label)
+            for file_path in files:
+                file_item = QTreeWidgetItem(label_item)
+                filename = os.path.basename(file_path)
+                # Check if reviewed
+                is_reviewed = file_path in self.progress.decisions
+                prefix = "✓ " if is_reviewed else "○ "
+                file_item.setText(0, f"{prefix}{filename}")
+                file_item.setData(0, Qt.UserRole, {"type": "file", "path": file_path})
+            
+            # Restore expanded state
+            if label in expanded_labels:
+                label_item.setExpanded(True)
+            else:
+                label_item.setExpanded(False)
+    
+    def on_tree_item_clicked(self, item: QTreeWidgetItem, column: int) -> None:
+        """Handle clicks on tree items."""
+        data = item.data(0, Qt.UserRole)
+        if not data:
+            return
+        
+        if data["type"] == "label":
+            # User clicked on a label - set it as active and load first file
+            label = data["label"]
+            self.load_label(label)
+        elif data["type"] == "file":
+            # User clicked on a specific file - just expand/collapse or could load that file
+            pass
+    
+    def load_label(self, label: str) -> None:
+        """Load a specific label and show its first unreviewed file."""
+        if not self.progress:
+            return
+        
+        self.current_label = label
+        self.progress.set_active_label(label)
+        self.show_next()
+        self.update_ui_state()
+        self.statusBar().showMessage(f"Working on label: {label}")
+
     def on_open_output_dir(self) -> None:
         directory = QFileDialog.getExistingDirectory(self, "Select output directory")
         if not directory:
@@ -172,7 +257,13 @@ class MainWindow(QMainWindow):
         self.progress = prog
         self.unsaved_changes = False
         self.statusBar().showMessage(f"Loaded output dir: {directory}")
-        self.show_next()
+        self.populate_label_tree()
+        # Load first label alphabetically by default
+        labels = self.progress.get_all_labels()
+        if labels:
+            self.load_label(labels[0])
+        else:
+            self.show_next()
         self.update_ui_state()
 
     def on_load_progress(self) -> None:
@@ -190,7 +281,13 @@ class MainWindow(QMainWindow):
         self.progress = prog
         self.unsaved_changes = False
         self.statusBar().showMessage(f"Loaded progress: {file_path}")
-        self.show_next()
+        self.populate_label_tree()
+        # Load first label alphabetically by default
+        labels = self.progress.get_all_labels()
+        if labels:
+            self.load_label(labels[0])
+        else:
+            self.show_next()
         self.update_ui_state()
 
     def on_save_progress(self) -> None:
@@ -220,6 +317,19 @@ class MainWindow(QMainWindow):
         self.current_rel_path = rel
         if rel is None:
             self.set_image(None)
+            # Check if current label is done or all is done
+            if self.current_label:
+                remaining_in_label = self.progress.get_remaining_for_label(self.current_label)
+                if not remaining_in_label:
+                    # Current label is complete
+                    self.lbl_label.setText(f"{self.current_label} - Complete ✅")
+                    self.lbl_info.setText(
+                        "This label is finished! Please select another label from the tree to continue."
+                    )
+                    # Refresh tree to show all files as reviewed
+                    self.populate_label_tree()
+                    return
+            # All done
             self.lbl_label.setText("All Done ✅")
             self.lbl_info.setText("All snippets reviewed. You can save your progress or open another directory.")
             return
@@ -228,8 +338,9 @@ class MainWindow(QMainWindow):
         self.load_and_show_image(abs_p)
         label = self.progress.get_label(rel)
         self.lbl_label.setText(label)
+        remaining_in_label = len(self.progress.get_remaining_for_label(label)) if self.current_label else self.progress.remaining
         self.lbl_info.setText(
-            f"File: {rel} | Reviewed: {self.progress.reviewed}/{self.progress.total} | Remaining: {self.progress.remaining}"
+            f"File: {rel} | Label Remaining: {remaining_in_label} | Total Reviewed: {self.progress.reviewed}/{self.progress.total}"
         )
 
     def on_select(self, selection: str) -> None:
@@ -238,6 +349,8 @@ class MainWindow(QMainWindow):
         try:
             self.progress.make_decision(self.current_rel_path, selection)
             self.unsaved_changes = True
+            # Refresh the tree to update the checkmark
+            self.populate_label_tree()
         finally:
             self.show_next()
             self.update_ui_state()
@@ -265,6 +378,7 @@ class MainWindow(QMainWindow):
         import matplotlib
         matplotlib.use("Agg")  # headless
         import matplotlib.pyplot as plt
+        from sklearn.metrics import fbeta_score
 
         os.makedirs(out_dir, exist_ok=True)
 
@@ -310,7 +424,31 @@ class MainWindow(QMainWindow):
             hard_acc = (v / n) if n else 0.0
             soft_acc = ((v + 0.5 * s) / n) if n else 0.0
             ci_low, ci_high = wilson_ci(v, n) if n else (0.0, 0.0)
-            metrics_rows.append((label, n, v, s, i, hard_acc, soft_acc, ci_low, ci_high))
+            
+            # Calculate F2 scores (Hard: Valid vs Incorrect, Soft: Valid+Similar vs Incorrect)
+            # For F2 score, we need binary labels: 1 for positive class, 0 for negative
+            # Hard: Valid=1 (positive), Incorrect=0 (negative), Similar excluded
+            # Soft: Valid+Similar=1 (positive), Incorrect=0 (negative)
+            hard_f2 = 0.0
+            soft_f2 = 0.0
+            
+            if v + i > 0:  # Need at least some valid or incorrect for hard F2
+                y_true_hard = [1] * v + [0] * i
+                y_pred_hard = [1] * v + [1] * i  # All predicted as positive (the label)
+                if len(set(y_true_hard)) > 1:  # Need both classes present
+                    hard_f2 = fbeta_score(y_true_hard, y_pred_hard, beta=2, zero_division=0.0)
+                elif v > 0:  # All valid, perfect score
+                    hard_f2 = 1.0
+            
+            if v + s + i > 0:  # For soft F2
+                y_true_soft = [1] * (v + s) + [0] * i
+                y_pred_soft = [1] * (v + s) + [1] * i  # All predicted as positive
+                if len(set(y_true_soft)) > 1:  # Need both classes present
+                    soft_f2 = fbeta_score(y_true_soft, y_pred_soft, beta=2, zero_division=0.0)
+                elif (v + s) > 0:  # All valid+similar, perfect score
+                    soft_f2 = 1.0
+            
+            metrics_rows.append((label, n, v, s, i, hard_acc, soft_acc, ci_low, ci_high, hard_f2, soft_f2))
 
         metrics_csv = os.path.join(out_dir, "per_label_metrics.csv")
         with open(metrics_csv, "w", newline="", encoding="utf-8") as f:
@@ -326,6 +464,8 @@ class MainWindow(QMainWindow):
                     "soft_accuracy",
                     "hard_ci_low",
                     "hard_ci_high",
+                    "hard_f2_score",
+                    "soft_f2_score",
                 ]
             )
             for row in metrics_rows:
@@ -388,6 +528,26 @@ class MainWindow(QMainWindow):
             fig3.tight_layout()
             fig3.savefig(os.path.join(out_dir, "per_label_accuracy.png"), dpi=150)
             plt.close(fig3)
+            
+            # F2 score chart per label (hard vs soft)
+            hard_f2 = [r[9] for r in metrics_rows]
+            soft_f2 = [r[10] for r in metrics_rows]
+            
+            fig4, ax4 = plt.subplots(figsize=(max(6, 0.45 * len(labels_sorted) + 2), 5))
+            width = 0.38
+            x_soft_f2 = [xi + width for xi in x]
+            bars1 = ax4.bar(x, hard_f2, width, label="Hard F2", color="#8e24aa")
+            bars2 = ax4.bar(x_soft_f2, soft_f2, width, label="Soft F2", color="#ce93d8")
+            ax4.set_xticks([xi + width / 2 for xi in x])
+            ax4.set_xticklabels(labels_sorted, rotation=20, ha="right")
+            ax4.set_ylim(0, 1)
+            ax4.set_ylabel("F2 Score")
+            ax4.set_title("Per-label F2 Scores (Hard vs Soft)")
+            ax4.legend()
+            ax4.grid(axis="y", linestyle=":", alpha=0.4)
+            fig4.tight_layout()
+            fig4.savefig(os.path.join(out_dir, "per_label_f2_scores.png"), dpi=150)
+            plt.close(fig4)
 
         # Simple metrics JSON (given available data)
         total = sum(by_sel.values())
@@ -396,6 +556,27 @@ class MainWindow(QMainWindow):
         incorrect = by_sel.get(SELECTION_INCORRECT, 0)
         soft_accuracy = (valid + 0.5 * similar) / total if total else 0.0
         hard_accuracy = valid / total if total else 0.0
+        
+        # Calculate overall F2 scores
+        hard_f2_overall = 0.0
+        soft_f2_overall = 0.0
+        
+        if valid + incorrect > 0:
+            y_true_hard = [1] * valid + [0] * incorrect
+            y_pred_hard = [1] * valid + [1] * incorrect
+            if len(set(y_true_hard)) > 1:
+                hard_f2_overall = fbeta_score(y_true_hard, y_pred_hard, beta=2, zero_division=0.0)
+            elif valid > 0:
+                hard_f2_overall = 1.0
+        
+        if valid + similar + incorrect > 0:
+            y_true_soft = [1] * (valid + similar) + [0] * incorrect
+            y_pred_soft = [1] * (valid + similar) + [1] * incorrect
+            if len(set(y_true_soft)) > 1:
+                soft_f2_overall = fbeta_score(y_true_soft, y_pred_soft, beta=2, zero_division=0.0)
+            elif (valid + similar) > 0:
+                soft_f2_overall = 1.0
+        
         metrics = {
             "total": total,
             "valid": valid,
@@ -403,7 +584,9 @@ class MainWindow(QMainWindow):
             "incorrect": incorrect,
             "hard_accuracy": hard_accuracy,
             "soft_accuracy": soft_accuracy,
-            "notes": "Metrics computed without ground-truth labels; ROC/Kappa require additional inputs.",
+            "hard_f2_score": hard_f2_overall,
+            "soft_f2_score": soft_f2_overall,
+            "notes": "Hard = Valid vs Incorrect; Soft = (Valid+Similar) vs Incorrect. F2 score emphasizes recall over precision.",
         }
         with open(os.path.join(out_dir, "metrics.json"), "w", encoding="utf-8") as f:
             json.dump(metrics, f, indent=2)
@@ -440,7 +623,7 @@ class MainWindow(QMainWindow):
         data = img.tobytes("raw", "RGBA")
         self._current_qimage_bytes = data  # hold reference
         qimg = QImage(
-            data, img.width, img.height, img.width * 4, QImage.Format.Format_RGBA8888
+            data, img.width, img.height, img.width * 4, QImage.Format_RGBA8888
         )
         return qimg
 
@@ -452,7 +635,7 @@ class MainWindow(QMainWindow):
         # Scale to fit scroll area
         area_size = self.scroll_area.viewport().size()
         scaled = pixmap.scaled(
-            area_size, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation
+            area_size, Qt.KeepAspectRatio, Qt.SmoothTransformation
         )
         self.image_label.setPixmap(scaled)
 
@@ -466,21 +649,19 @@ class MainWindow(QMainWindow):
                 if os.path.exists(abs_p):
                     self.load_and_show_image(abs_p)
 
-    def closeEvent(self, event: QCloseEvent) -> None:  # type: ignore[override]
+    def closeEvent(self, event) -> None:  # type: ignore[override]
         if self.unsaved_changes and self.progress and self.progress.reviewed > 0:
             resp = QMessageBox.question(
                 self,
                 "Save progress?",
                 "You have unsaved changes. Do you want to save before exiting?",
-                QMessageBox.StandardButton.Yes
-                | QMessageBox.StandardButton.No
-                | QMessageBox.StandardButton.Cancel,
-                QMessageBox.StandardButton.Yes,
+                QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel,
+                QMessageBox.Yes,
             )
-            if resp == QMessageBox.StandardButton.Cancel:
+            if resp == QMessageBox.Cancel:
                 event.ignore()
                 return
-            if resp == QMessageBox.StandardButton.Yes:
+            if resp == QMessageBox.Yes:
                 self.on_save_progress()
         event.accept()
 
